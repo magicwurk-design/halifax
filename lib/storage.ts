@@ -1,6 +1,6 @@
 import { AppState, AuditEntry, SubAccount } from './types';
-import { makeSeedSubAccount, ADMIN_ACCOUNT } from './mockData';
-import { supabase } from './supabase';
+import { ADMIN_ACCOUNT } from './mockData';
+import { isSupabaseConfigured, supabase } from './supabase';
 
 export function getDefaultState(): AppState {
   return {
@@ -14,6 +14,10 @@ export function getDefaultState(): AppState {
 // ─── Supabase persistence ────────────────────────────────────────────────────
 
 export async function loadStateFromSupabase(): Promise<AppState> {
+  if (!isSupabaseConfigured) {
+    throw new Error('Supabase is not configured; refusing to query the placeholder database.');
+  }
+
   try {
     const { data: saRows, error: saErr } = await supabase
       .from('sub_accounts')
@@ -82,12 +86,13 @@ export async function loadStateFromSupabase(): Promise<AppState> {
 
     return { subAccounts, activeSubAccountId: null, auditLog, adminAccount: { ...ADMIN_ACCOUNT, balance: await loadAdminBalance() } };
   } catch (err) {
-    console.warn('[Halifax] Supabase load failed, using defaults:', err);
-    return getDefaultState();
+    console.warn('[Halifax] Supabase load failed, using localStorage fallback:', err);
+    return loadStateLocal();
   }
 }
 
 export async function loadAdminBalance(): Promise<number> {
+  if (!isSupabaseConfigured) return ADMIN_ACCOUNT.balance;
   try {
     const { data, error } = await supabase
       .from('app_config')
@@ -102,6 +107,7 @@ export async function loadAdminBalance(): Promise<number> {
 }
 
 export async function upsertAdminBalance(balance: number): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('app_config').upsert({
       key: 'admin_balance',
@@ -114,6 +120,7 @@ export async function upsertAdminBalance(balance: number): Promise<void> {
 }
 
 export async function upsertSubAccount(sa: SubAccount): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('sub_accounts').upsert({
       id: sa.id,
@@ -133,6 +140,7 @@ export async function upsertSubAccount(sa: SubAccount): Promise<void> {
 }
 
 export async function upsertTransaction(subAccountId: string, tx: SubAccount['transactions'][0]): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('transactions').upsert({
       id: tx.id,
@@ -155,6 +163,7 @@ export async function upsertTransaction(subAccountId: string, tx: SubAccount['tr
 }
 
 export async function deleteTransactionFromSupabase(txId: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('transactions').delete().eq('id', txId);
   } catch (err) {
@@ -163,6 +172,7 @@ export async function deleteTransactionFromSupabase(txId: string): Promise<void>
 }
 
 export async function deleteAllTransactionsForAccount(subAccountId: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('transactions').delete().eq('sub_account_id', subAccountId);
   } catch (err) {
@@ -171,6 +181,7 @@ export async function deleteAllTransactionsForAccount(subAccountId: string): Pro
 }
 
 export async function deleteSubAccountFromSupabase(id: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('transactions').delete().eq('sub_account_id', id);
     await supabase.from('sub_accounts').delete().eq('id', id);
@@ -180,6 +191,7 @@ export async function deleteSubAccountFromSupabase(id: string): Promise<void> {
 }
 
 export async function saveAuditEntryToSupabase(entry: AuditEntry): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     await supabase.from('audit_log').insert({
       id: entry.id,
@@ -193,6 +205,7 @@ export async function saveAuditEntryToSupabase(entry: AuditEntry): Promise<void>
 }
 
 export async function resetAllSupabaseData(): Promise<void> {
+  if (!isSupabaseConfigured) return;
   try {
     const { data: saRows } = await supabase.from('sub_accounts').select('id');
     if (saRows && saRows.length > 0) {
@@ -236,7 +249,7 @@ export function loadStateLocal(): AppState {
               ...sa.user,
               bankId: sa.user?.bankId ?? 'halifax',
               bankName: sa.user?.bankName ?? 'Halifax Private Banking',
-              bankFlag: sa.user?.bankFlag ?? '🇬🇧',
+              bankFlag: sa.user?.bankFlag ?? '🇬����',
               bankType: sa.user?.bankType ?? 'halifax',
               iban: sa.user?.iban ?? '',
               swiftBic: sa.user?.swiftBic ?? '',

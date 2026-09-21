@@ -1,44 +1,56 @@
-# Halifax Private Banking — Setup Guide
+# Halifax Private Banking — Supabase Setup
 
-## 1. Clone & Install
-```bash
-git clone <your-repo-url>
-cd <project-folder>
-npm install
-```
+The repository already includes the Supabase client integration in `lib/supabase.ts`, persistence helpers in `lib/storage.ts`, and the database schema in `supabase/migrations/001_initial_schema.sql`.
 
-## 2. Supabase Setup
-1. Create a new project at https://supabase.com
-2. Go to **SQL Editor** and run the contents of `supabase/migrations/001_initial_schema.sql`
-3. Go to **Settings → API** and copy your **Project URL** and **anon public key**
+## 1. Create a Supabase project
 
-## 3. Environment Variables
+1. Create a project at https://supabase.com.
+2. Open **SQL Editor** in the Supabase dashboard.
+3. Run the complete contents of `supabase/migrations/001_initial_schema.sql`.
+4. Open **Settings → API** and copy the Project URL and the anon/public key.
+
+## 2. Configure local environment variables
+
+Create a local environment file. The file is intentionally ignored by Git:
+
 ```bash
 cp .env.example .env.local
 ```
-Fill in `.env.local`:
-```
-NEXT_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
-NEXT_PUBLIC_ADMIN_EMAIL=admin@halifaxbanking.co.uk
-NEXT_PUBLIC_ADMIN_PASSWORD=HalifaxSecure2026!
-NEXT_PUBLIC_ADMIN_PIN=246810
+
+Replace the placeholders in `.env.local`:
+
+```text
+NEXT_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+NEXT_PUBLIC_ADMIN_EMAIL=your-admin-email
+NEXT_PUBLIC_ADMIN_PASSWORD=use-a-new-long-random-password
+NEXT_PUBLIC_ADMIN_PIN=use-a-new-six-digit-pin
 ```
 
-## 4. Run Locally
+Never commit `.env.local`, the Supabase service-role key, or real production credentials.
+
+## 3. Run and verify locally
+
 ```bash
+npm install
+npm run typecheck
+npm run build
 npm run dev
 ```
 
-## 5. Deploy to Vercel
-1. Push to GitHub
-2. Import the repo in Vercel
-3. Add all environment variables from `.env.local` in Vercel project settings
-4. Deploy — Vercel auto-detects Next.js
+Open `/admin/login`, sign in, create or update a test account, then verify that the record appears in Supabase under **Table Editor**.
 
-## Tech Stack
-- **Next.js 14** (App Router)
-- **Supabase** (Postgres database + real-time)
-- **Tailwind CSS** with glassmorphism design system
-- **Radix UI** components
-- **TypeScript** throughout
+If Supabase is unavailable, the app currently falls back to localStorage. That fallback is useful for development but should not be treated as a production data store.
+
+## 4. Configure Vercel
+
+1. Import this GitHub repository into Vercel.
+2. Keep the framework as **Next.js**.
+3. Add the same environment variables in **Project Settings → Environment Variables** for the environments you use.
+4. Deploy and check the Vercel build logs.
+
+Only the Supabase URL and anon/public key belong in a browser app. Do not add `SUPABASE_SERVICE_ROLE_KEY` to a client-exposed variable or commit it to the repository.
+
+## Security warning
+
+The current admin login is a demo implementation: credentials use `NEXT_PUBLIC_*` variables, the check runs in the browser, and the session is stored in localStorage. The migration also allows the anon role broad access so the demo can operate directly from the client. Before using real financial or personal data, replace this with Supabase Auth, server-side authorization, and restrictive Row Level Security policies. Do not use the current schema/policies for a production banking system without a security review.

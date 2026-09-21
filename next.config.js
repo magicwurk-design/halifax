@@ -10,8 +10,8 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
-  typescript: { ignoreBuildErrors: true },
-  eslint: { ignoreDuringBuilds: true },
+  typescript: { ignoreBuildErrors: false },
+  eslint: { ignoreDuringBuilds: false },
   images: { unoptimized: true },
   compress: true,
   poweredByHeader: false,

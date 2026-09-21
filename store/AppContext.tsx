@@ -11,7 +11,7 @@ import {
   deleteAllTransactionsForAccount, deleteSubAccountFromSupabase, saveAuditEntryToSupabase,
   resetAllSupabaseData, upsertAdminBalance,
 } from '@/lib/storage';
-import { supabase } from '@/lib/supabase';
+import { supabase, isSupabaseConfigured } from '@/lib/supabase';
 import { makeSeedSubAccount, ADMIN_ACCOUNT } from '@/lib/mockData';
 import { generateReference, formatCurrency } from '@/lib/formatters';
 import { saveAdminSession, loadAdminSession, clearAdminSession, saveClientSession, loadClientSession, clearClientSession } from '@/lib/auth';
@@ -65,7 +65,7 @@ function reducer(state: AppState, action: Action): AppState {
     case 'CREATE_SUBACCOUNT':
       return { ...state, subAccounts: [...state.subAccounts, action.subAccount], auditLog: addAudit(state, 'Subaccount Created', action.subAccount.user.name) };
     case 'DELETE_SUBACCOUNT':
-      return { ...state, subAccounts: state.subAccounts.filter((sa) => sa.id !== action.id), activeSubAccountId: state.activeSubAccountId === action.id ? null : state.activeSubAccountId, auditLog: addAudit(state, 'Subaccount Deleted', `ID: ${action.id}`) };
+      return { ...state, subAccounts: state.subAccounts.filter((sa) => sa.id !== action.id), activeSubAccountId: state.activeSubAccountId === action.id ? null : state.activeSubAccountId, auditLog: [...state.auditLog].slice(0, MAX_AUDIT) };
     case 'TOPUP':
       return updateSubAccount(state, action.subAccountId, (sa) => ({ ...sa, balance: parseFloat((sa.balance + action.amount).toFixed(2)), transactions: [action.newTx, ...sa.transactions] }));
     case 'UPDATE_CARD':
@@ -156,7 +156,6 @@ interface AppContextValue {
   adminSetAccountTxStatus: (subAccountId: string, transactionStatus: import('@/lib/types').AccountTransactionStatus) => void;
   adminResetDemo: () => Promise<void>;
   adminDeductBalance: (amount: number) => void;
-  // Lookup helpers
   findSubAccountByAccountNumber: (accountNumber: string) => SubAccount | null;
   findSubAccountByIban: (iban: string) => SubAccount | null;
   findSubAccountByAny: (query: string) => SubAccount | null;
@@ -198,13 +197,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     async function hydrate() {
+      const fallbackState = loadStateLocal();
+
+      if (!isSupabaseConfigured) {
+        if (!cancelled) {
+          dispatch({ type: 'HYDRATE', state: fallbackState });
+          setIsHydrated(true);
+        }
+        return;
+      }
+
       let saved: AppState;
       try {
         saved = await loadStateFromSupabase();
         if (!cancelled) saveStateLocal(saved);
       } catch {
-        saved = loadStateLocal();
+        saved = fallbackState;
       }
+
       if (cancelled) return;
       dispatch({ type: 'HYDRATE', state: saved });
       if (loadAdminSession()) setIsAdmin(true);
@@ -216,45 +226,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       setIsHydrated(true);
     }
+
     hydrate();
     return () => { cancelled = true; };
   }, []);
 
-  // ── Supabase Realtime subscriptions ─────────────────────────────────────────
   useEffect(() => {
-    if (!isHydrated) return;
+    if (!isHydrated || !isSupabaseConfigured) return;
 
-    // Subscribe to sub_accounts changes
     const accountsSub = supabase
       .channel('realtime:sub_accounts')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sub_accounts' },
-        async () => {
-          // Re-fetch full state on any account change
-          try {
-            const fresh = await loadStateFromSupabase();
-            const cs = loadClientSession();
-            dispatch({ type: 'HYDRATE', state: fresh });
-            if (cs) dispatch({ type: 'SELECT_SUBACCOUNT', id: cs.subAccountId });
-            saveStateLocal(fresh);
-          } catch { /* fail silently */ }
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sub_accounts' }, async () => {
+        try {
+          const fresh = await loadStateFromSupabase();
+          const cs = loadClientSession();
+          dispatch({ type: 'HYDRATE', state: fresh });
+          if (cs) dispatch({ type: 'SELECT_SUBACCOUNT', id: cs.subAccountId });
+          saveStateLocal(fresh);
+        } catch {
+          // Fall back silently when the DB is unavailable during a live update.
         }
-      )
+      })
       .subscribe();
 
-    // Subscribe to transactions changes
     const txSub = supabase
       .channel('realtime:transactions')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' },
-        async () => {
-          try {
-            const fresh = await loadStateFromSupabase();
-            const cs = loadClientSession();
-            dispatch({ type: 'HYDRATE', state: fresh });
-            if (cs) dispatch({ type: 'SELECT_SUBACCOUNT', id: cs.subAccountId });
-            saveStateLocal(fresh);
-          } catch { /* fail silently */ }
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'transactions' }, async () => {
+        try {
+          const fresh = await loadStateFromSupabase();
+          const cs = loadClientSession();
+          dispatch({ type: 'HYDRATE', state: fresh });
+          if (cs) dispatch({ type: 'SELECT_SUBACCOUNT', id: cs.subAccountId });
+          saveStateLocal(fresh);
+        } catch {
+          // Fall back silently when the DB is unavailable during a live update.
         }
-      )
+      })
       .subscribe();
 
     return () => {
@@ -293,7 +300,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const findSubAccountByIban = useCallback((iban: string): SubAccount | null => {
     if (!iban.trim()) return null;
-    // Strip spaces AND hyphens, case-insensitive
     const clean = iban.replace(/[\s\-]/g, '').toLowerCase();
     return state.subAccounts.find(sa => {
       const stored = (sa.user.iban ?? '').replace(/[\s\-]/g, '').toLowerCase();
@@ -301,42 +307,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }) ?? null;
   }, [state.subAccounts]);
 
-  // Universal lookup: account number → IBAN → sort code → email.
-  // Works for ALL admin-created clients: Halifax, Barclays, HSBC, international IBAN accounts, etc.
   const findSubAccountByAny = useCallback((query: string): SubAccount | null => {
     if (!query.trim()) return null;
     const clean = query.replace(/[\s\-]/g, '').toLowerCase();
     if (!clean) return null;
 
-    // 1. Account number (UK/Halifax/Barclays/any UK bank clients)
     const byAcct = state.subAccounts.find(sa => {
       const stored = (sa.user.accountNumber ?? '').replace(/[\s\-]/g, '').toLowerCase();
       return stored.length > 0 && stored === clean;
     });
     if (byAcct) return byAcct;
 
-    // 2. IBAN (international clients — strip spaces & hyphens, case-insensitive)
     const byIban = state.subAccounts.find(sa => {
       const stored = (sa.user.iban ?? '').replace(/[\s\-]/g, '').toLowerCase();
       return stored.length > 0 && stored === clean;
     });
     if (byIban) return byIban;
 
-    // 3. Sort code fallback (UK clients — allows lookup by "20-41-63" or "204163")
     const bySortCode = state.subAccounts.find(sa => {
       const stored = (sa.user.sortCode ?? '').replace(/[\s\-]/g, '').toLowerCase();
       return stored.length > 0 && stored === clean;
     });
     if (bySortCode) return bySortCode;
 
-    // 4. SWIFT/BIC fallback (international clients)
     const bySwift = state.subAccounts.find(sa => {
       const stored = (sa.user.swiftBic ?? '').replace(/[\s\-]/g, '').toLowerCase();
       return stored.length > 0 && stored === clean;
     });
     if (bySwift) return bySwift;
 
-    // 5. Email fallback (any client type — case-insensitive)
     const byEmail = state.subAccounts.find(sa =>
       sa.user.email.trim().toLowerCase() === query.trim().toLowerCase()
     );
@@ -400,7 +399,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (sa) upsertSubAccount({ ...sa, cardSettings: { ...sa.cardSettings, ...settings } }).catch(() => {});
   }, [state.activeSubAccountId, state.subAccounts]);
 
-  // External transfer (to banks outside Halifax)
   const transfer = useCallback((payload: TransferPayload): { success: boolean; message: string; receipt?: Receipt } => {
     if (!state.activeSubAccountId || !activeSubAccount) return { success: false, message: 'No active subaccount.' };
     if (payload.amount <= 0) return { success: false, message: 'Amount must be greater than zero.' };
@@ -444,12 +442,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return { success: outcome !== 'failed', message: outcome === 'success' ? 'Transfer completed.' : outcome === 'pending' ? 'Transfer is processing.' : 'Transfer was declined.', receipt };
   }, [state.activeSubAccountId, activeSubAccount]);
 
-  // Internal transfer: platform-to-platform (any subaccount to any other subaccount, or to admin)
   const internalTransfer = useCallback((payload: TransferPayload): { success: boolean; message: string; receipt?: Receipt } => {
     const now = new Date().toISOString();
     const reference = 'HLX-' + generateReference();
 
-    // Helper to build a failed receipt so the result screen always has something to show
     const failReceipt = (reason: string): Receipt => ({
       id: genId(), status: 'failed',
       recipientName: payload.recipientName,
@@ -470,7 +466,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (payload.amount > activeSubAccount.balance) return { success: false, message: 'Insufficient funds.', receipt: failReceipt('Insufficient funds in your account.') };
     if (!payload.internalRecipientId) return { success: false, message: 'No recipient specified.', receipt: failReceipt('Recipient could not be identified.') };
 
-    // Admin transfer status applies to internal transfers too
     const acctStatus = activeSubAccount.transactionStatus ?? 'normal';
     const outcome: TransferOutcome =
       acctStatus === 'pending' ? 'pending'
@@ -493,7 +488,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let creditTx: Transaction | undefined;
     let newRecipientBalance: number | undefined;
 
-    // Only credit the recipient if transfer succeeded
     if (outcome === 'success' && payload.internalRecipientId !== 'ADMIN') {
       const recipientSa = state.subAccounts.find(sa => sa.id === payload.internalRecipientId);
       if (recipientSa) {
@@ -520,13 +514,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       newRecipientBalance,
     });
 
-    // Persist sender
     upsertSubAccount({ ...activeSubAccount, balance: newSenderBalance }).catch(() => {});
     upsertTransaction(state.activeSubAccountId, debitTx).catch(() => {});
 
     if (outcome === 'success') {
       if (payload.internalRecipientId === 'ADMIN') {
-        // Persist admin balance to Supabase
         const newAdminBalance = parseFloat((state.adminAccount.balance + payload.amount).toFixed(2));
         upsertAdminBalance(newAdminBalance).catch(() => {});
       } else if (creditTx && newRecipientBalance !== undefined) {
